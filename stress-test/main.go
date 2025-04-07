@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,76 +15,266 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
 	trainURL        = "http://localhost:8084/"
-	defaultSubDirs  = 100
-	defaultFileSize = 256 * 1024
+	defaultNumFiles = 500
+	defaultFileSize = 5
+	setupBatchSize  = 100
 )
 
 func main() {
-	lh := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})
+	lh := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 	slog.SetDefault(slog.New(lh))
-
 	slog.Info("starting")
 
-	err := run()
+	startTime := time.Now()
+
+	flagSo := flag.Bool("so", false, "only run setup stage")
+	flagId := flag.String("id", "", "use existing test directory id (skips setup)")
+	flagDebug := flag.Bool("debug", false, "debug mode")
+	flagFileSize := flag.Int("fsize", defaultFileSize, "file size in kb")
+	flagSetupFiles := flag.Int("sf", defaultNumFiles, "number of files to create on setup")
+	flagCopyFiles := flag.Int("cp", defaultNumFiles, "number of files to copy in manifest")
+	flagPublishFiles := flag.Int("pf", defaultNumFiles, "number of files to publish in manifest")
+	flagVersion := flag.Int("v", 1, "version to create on publish")
+	flagNoCleanup := flag.Bool("noclean", false, "do not clean up test files")
+	flagCleanAll := flag.Bool("clean", false, "clean whole test directory and exit")
+
+	flag.Parse()
+
+	config := runConfig{
+		CleanOnly:    *flagCleanAll,
+		SetupOnly:    *flagSo,
+		ID:           *flagId,
+		FileSize:     *flagFileSize * 1024,
+		SetupFiles:   *flagSetupFiles,
+		CopyFiles:    *flagCopyFiles,
+		PublishFiles: *flagPublishFiles,
+		Version:      *flagVersion,
+		Cleanup:      !(*flagNoCleanup),
+	}
+
+	if *flagDebug {
+		logHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})
+		slog.SetDefault(slog.New(logHandler))
+		slog.Debug("debug mode")
+	}
+
+	slog.Debug("parsed flags", "flags ", flag.Args(), "config", config)
+
+	err := run(config)
 	if err != nil {
 		slog.Error("fatal error", "err", err.Error())
 		os.Exit(1)
 	}
 
-	slog.Info("complete")
+	endTime := time.Now()
+	slog.Info("complete", "runTime", endTime.Sub(startTime).Round(time.Millisecond).Milliseconds())
 }
 
-func run() error {
-	testId, err := initTestDir(defaultSubDirs, defaultFileSize)
+type runConfig struct {
+	CleanOnly    bool
+	SetupOnly    bool
+	ID           string
+	FileSize     int
+	NumFiles     int
+	SetupFiles   int
+	CopyFiles    int
+	PublishFiles int
+	Version      int
+	Cleanup      bool
+}
+
+func run(config runConfig) error {
+	if config.CleanOnly {
+		slog.Info("cleaning entire test directory")
+		return cleanup("/test")
+	}
+
+	testId := config.ID
+	if config.SetupOnly || testId == "" {
+		newTestId, err := initTestDir(defaultNumFiles, config.FileSize)
+		if err != nil {
+			return err
+		}
+		testId = newTestId
+		slog.Info("initialised test directory", "testId", testId)
+	}
+	if config.SetupOnly {
+		return nil
+	}
+
+	err := publishingSimulation(testId, config.CopyFiles, config.Version, config.PublishFiles, config.FileSize)
 	if err != nil {
 		return err
 	}
-	slog.Info("initialised test directory", "testId", testId)
+
+	if config.Cleanup {
+		cleanup(filepath.Join("/test", testId))
+	}
 	return nil
 }
 
-func initTestDir(subDirs, filesize int) (string, error) {
+func initTestDir(numFiles, fileSize int) (string, error) {
+	var testId, testDir string
+	mu := sync.Mutex{}
+	mu.Lock()
+	wg := sync.WaitGroup{}
+	var anyError error = nil
+	slog.Info("initialising test directory", "numFiles", numFiles, "fileSize", fileSize)
+	for sn := 0; sn < numFiles; sn += setupBatchSize {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			transactionID, err := openTransaction()
+			if err != nil {
+				slog.Error("failed to open transaction", "err", err.Error())
+				anyError = err
+			}
+			slog.Debug("init transaction created", "id", transactionID, "batch_start", sn)
+
+			if sn == 0 {
+				// reuse the initial transactionId as a test dir
+				testId = transactionID
+				testDir = "/test/" + testId
+				mu.Unlock()
+			} else {
+				mu.Lock()
+				mu.Unlock()
+				slog.Debug("reusing test dir from first batch", "id", transactionID, "batch_start", sn, "testDir", testDir)
+			}
+
+			for i := sn; i < numFiles && i < sn+setupBatchSize; i++ {
+				subdir := genSubDirName(i)
+
+				data, err := genFileContent(path.Join(testDir, subdir), subdir, fileSize)
+				if err != nil {
+					anyError = fmt.Errorf("failed to generate test data: %w", err)
+				}
+				slog.Debug("generated test data", "subdir", subdir, "length", len(data))
+
+				uri := path.Join(testDir, subdir, "data.json")
+				err = sendFile(transactionID, uri, data)
+				if err != nil {
+					slog.Error("failed to send file", "err", err.Error())
+					anyError = err
+				}
+				slog.Debug("sent test data", "subdir", subdir, "length", len(data))
+				if i%100 == 99 {
+					slog.Debug("sent another hundred files", "total", i+1)
+				}
+			}
+
+			err = commitTransaction(transactionID)
+			if err != nil {
+				slog.Error("failed to commit transaction", "err", err.Error())
+				anyError = err
+			}
+			slog.Debug("transaction committed", "id", transactionID, "batch_start", sn)
+		}()
+	}
+	wg.Wait()
+	if anyError != nil {
+		return "", anyError
+	}
+	return testId, nil
+}
+
+func publishingSimulation(testId string, subDirs, version, publishFiles, fileSize int) error {
+	testDir := "/test/" + testId
+
 	transactionID, err := openTransaction()
 	if err != nil {
-		slog.Error("failed to open transaction", "err", err.Error())
-		return "", err
+		slog.Error("failed to open publishing transaction", "err", err.Error())
+		return err
 	}
-	slog.Info("transaction created", "id", transactionID)
+	slog.Info("publishing transaction created", "id", transactionID)
 
-	// reuse the initial transactionId as a test dir
-	testDir := "/test/" + transactionID
-
+	// Send a pre-publishing manifest of files to be copied (versioned)
+	mf := manifest{
+		FilesToCopy:  make([]fileToCopy, 0),
+		UrisToDelete: make([]string, 0),
+	}
 	for i := 0; i < subDirs; i++ {
 		subdir := genSubDirName(i)
+		mf.FilesToCopy = append(mf.FilesToCopy, fileToCopy{
+			Source: path.Join(testDir, subdir, "data.json"),
+			Target: path.Join(testDir, subdir, fmt.Sprintf("v%d", version), "data.json"),
+		})
+	}
 
-		data, err := genFileContent(path.Join(testDir, subdir), subdir, filesize)
+	slog.Debug("created publishing manifest", "mf", mf)
+
+	err = sendManifest(transactionID, &mf)
+	if err != nil {
+		slog.Error("failed to send manifest", "err", err.Error())
+		return err
+	}
+
+	// Publish some new files
+
+	for i := 0; i < publishFiles; i++ {
+		subdir := genSubDirName(i)
+
+		data, err := genFileContent(path.Join(testDir, subdir), subdir, fileSize)
 		if err != nil {
-			return "", fmt.Errorf("failed to generate test data: %w", err)
+			return fmt.Errorf("failed to generate test data for file publish: %w", err)
 		}
-		slog.Debug("generated test data", "subdir", subdir, "length", len(data))
+		slog.Debug("generated publishing test data", "subdir", subdir, "length", len(data))
 
 		uri := path.Join(testDir, subdir, "data.json")
 		err = sendFile(transactionID, uri, data)
 		if err != nil {
-			slog.Error("failed to send file", "err", err.Error())
-			return "", err
+			slog.Error("failed to publish file", "err", err.Error())
+			return err
 		}
-		slog.Debug("sent test data", "subdir", subdir, "length", len(data))
+		slog.Debug("published test data", "subdir", subdir, "length", len(data))
+		if i%100 == 99 {
+			slog.Debug("published another hundred files", "total", i+1)
+		}
 	}
 
 	err = commitTransaction(transactionID)
 	if err != nil {
 		slog.Error("failed to commit transaction", "err", err.Error())
-		return "", err
+		return err
 	}
-	slog.Info("transaction committed")
+	slog.Info("publishing transaction committed", "id", transactionID)
 
-	return transactionID, nil
+	return nil
+}
+
+func cleanup(dirToClean string) error {
+	transactionID, err := openTransaction()
+	if err != nil {
+		slog.Error("failed to open cleanup transaction", "err", err.Error())
+		return err
+	}
+	slog.Info("cleanup transaction created", "id", transactionID)
+
+	// Send a cleanup manifest of uri to be deleted
+	mf := manifest{
+		FilesToCopy:  make([]fileToCopy, 0),
+		UrisToDelete: []string{dirToClean},
+	}
+
+	err = sendManifest(transactionID, &mf)
+	if err != nil {
+		slog.Error("failed to send cleanup manifest", "err", err.Error())
+		return err
+	}
+
+	err = commitTransaction(transactionID)
+	if err != nil {
+		slog.Error("failed to commit cleanup transaction", "err", err.Error())
+		return err
+	}
+	slog.Info("cleanup completed", "id", transactionID)
+	return nil
 }
 
 func genSubDirName(n int) string {
@@ -295,6 +486,9 @@ func genContentPadding(size int) string {
 		case "n2":
 			padding[i] = byte('\n')
 			next = "C"
+		case "_":
+			padding[i] = byte(' ')
+			next = "C"
 		case "C":
 			padding[i] = byte(rand.IntN(26) + 65)
 			next = ""
@@ -303,12 +497,73 @@ func genContentPadding(size int) string {
 			next = ""
 		case ".":
 			padding[i] = byte('.')
-			next = "C"
+			next = "_"
 		default:
 			padding[i] = byte(rand.IntN(26) + 97)
 		}
 		chsLeft--
 	}
-	padding[size-1] = byte('.')
+	if size > 4 {
+		// make sure it ends cleanly.
+		padding[size-4] = byte(rand.IntN(26) + 97)
+		padding[size-3] = byte(rand.IntN(26) + 97)
+		padding[size-2] = byte(rand.IntN(26) + 97)
+		padding[size-1] = byte('.')
+	}
 	return string(padding)
+}
+
+type manifest struct {
+	FilesToCopy  []fileToCopy `json:"filesToCopy"`
+	UrisToDelete []string     `json:"urisToDelete"`
+}
+
+type fileToCopy struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
+type sendManifestResponse struct {
+	Message     string `json:"message"`
+	Transaction struct {
+		ID string `json:"id"`
+	} `json:"transaction"`
+}
+
+func sendManifest(transactionID string, mf *manifest) error {
+	url, err := url.Parse(trainURL)
+	if err != nil {
+		return fmt.Errorf("failed to parse train url: [%w]", err)
+	}
+	url.Path = path.Join(url.Path, "CommitManifest")
+	q := url.Query()
+	q.Set("transactionId", transactionID)
+	url.RawQuery = q.Encode()
+
+	payload, err := json.Marshal(mf)
+	if err != nil {
+		return fmt.Errorf("failed to marshal manifest: [%w]", err)
+	}
+
+	slog.Debug("sending manifest", "url", url.String())
+	r, err := http.Post(url.String(), "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("failed to call train: [%w]", err)
+	}
+	if r.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: [%d] %s", r.StatusCode, http.StatusText(r.StatusCode))
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read train response: [%w]", err)
+	}
+	tr := sendManifestResponse{}
+	err = json.Unmarshal(body, &tr)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal train response: [%w]", err)
+	}
+
+	slog.Debug("sent manifest", "id", transactionID)
+
+	return nil
 }
