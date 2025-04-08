@@ -20,10 +20,13 @@ import (
 )
 
 const (
-	trainURL        = "http://localhost:8084/"
-	defaultNumFiles = 500
-	defaultFileSize = 5
-	setupBatchSize  = 100
+	defaultNumFiles       = 500
+	defaultFileSize       = 5
+	defaultSetupBatchSize = 100
+)
+
+var (
+	DefaultTrainURL = "http://localhost:8084/"
 )
 
 func main() {
@@ -37,12 +40,14 @@ func main() {
 	flagId := flag.String("id", "", "use existing test directory id (skips setup)")
 	flagDebug := flag.Bool("debug", false, "debug mode")
 	flagFileSize := flag.Int("fsize", defaultFileSize, "file size in kb")
-	flagSetupFiles := flag.Int("sf", defaultNumFiles, "number of files to create on setup")
-	flagCopyFiles := flag.Int("cp", defaultNumFiles, "number of files to copy in manifest")
-	flagPublishFiles := flag.Int("pf", defaultNumFiles, "number of files to publish in manifest")
+	flagSetupFiles := flag.Int("sf", defaultNumFiles, "number of files to send on setup")
+	flagCopyFiles := flag.Int("cp", defaultNumFiles, "number of files to copy via manifest")
+	flagPublishFiles := flag.Int("pf", defaultNumFiles, "number of files to send during publish")
 	flagVersion := flag.Int("v", 1, "version to create on publish")
 	flagNoCleanup := flag.Bool("noclean", false, "do not clean up test files")
 	flagCleanAll := flag.Bool("clean", false, "clean whole test directory and exit")
+	flagBatchSize := flag.Int("batch", defaultSetupBatchSize, "number of files in each batch on setup")
+	flagTrainUrl := flag.String("url", DefaultTrainURL, "train url")
 
 	flag.Parse()
 
@@ -56,6 +61,8 @@ func main() {
 		PublishFiles: *flagPublishFiles,
 		Version:      *flagVersion,
 		Cleanup:      !(*flagNoCleanup),
+		BatchSize:    *flagBatchSize,
+		TrainURL:     *flagTrainUrl,
 	}
 
 	if *flagDebug {
@@ -87,17 +94,23 @@ type runConfig struct {
 	PublishFiles int
 	Version      int
 	Cleanup      bool
+	BatchSize    int
+	TrainURL     string
 }
 
 func run(config runConfig) error {
+	train, err := url.Parse(config.TrainURL)
+	if err != nil {
+		return fmt.Errorf("failed to parse train url: [%w]", err)
+	}
 	if config.CleanOnly {
 		slog.Info("cleaning entire test directory")
-		return cleanup("/test")
+		return cleanup(train, "/test")
 	}
 
 	testId := config.ID
 	if config.SetupOnly || testId == "" {
-		newTestId, err := initTestDir(defaultNumFiles, config.FileSize)
+		newTestId, err := initTestDir(train, config.SetupFiles, config.FileSize, config.BatchSize)
 		if err != nil {
 			return err
 		}
@@ -108,29 +121,29 @@ func run(config runConfig) error {
 		return nil
 	}
 
-	err := publishingSimulation(testId, config.CopyFiles, config.Version, config.PublishFiles, config.FileSize)
+	err = publishingSimulation(train, testId, config.CopyFiles, config.Version, config.PublishFiles, config.FileSize)
 	if err != nil {
 		return err
 	}
 
 	if config.Cleanup {
-		cleanup(filepath.Join("/test", testId))
+		cleanup(train, filepath.Join("/test", testId))
 	}
 	return nil
 }
 
-func initTestDir(numFiles, fileSize int) (string, error) {
+func initTestDir(train *url.URL, numFiles, fileSize, batchSize int) (string, error) {
 	var testId, testDir string
 	mu := sync.Mutex{}
 	mu.Lock()
 	wg := sync.WaitGroup{}
 	var anyError error = nil
 	slog.Info("initialising test directory", "numFiles", numFiles, "fileSize", fileSize)
-	for sn := 0; sn < numFiles; sn += setupBatchSize {
+	for sn := 0; sn < numFiles; sn += batchSize {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			transactionID, err := openTransaction()
+			transactionID, err := openTransaction(train)
 			if err != nil {
 				slog.Error("failed to open transaction", "err", err.Error())
 				anyError = err
@@ -148,7 +161,7 @@ func initTestDir(numFiles, fileSize int) (string, error) {
 				slog.Debug("reusing test dir from first batch", "id", transactionID, "batch_start", sn, "testDir", testDir)
 			}
 
-			for i := sn; i < numFiles && i < sn+setupBatchSize; i++ {
+			for i := sn; i < numFiles && i < sn+batchSize; i++ {
 				subdir := genSubDirName(i)
 
 				data, err := genFileContent(path.Join(testDir, subdir), subdir, fileSize)
@@ -158,18 +171,18 @@ func initTestDir(numFiles, fileSize int) (string, error) {
 				slog.Debug("generated test data", "subdir", subdir, "length", len(data))
 
 				uri := path.Join(testDir, subdir, "data.json")
-				err = sendFile(transactionID, uri, data)
+				err = sendFile(train, transactionID, uri, data)
 				if err != nil {
 					slog.Error("failed to send file", "err", err.Error())
 					anyError = err
 				}
 				slog.Debug("sent test data", "subdir", subdir, "length", len(data))
 				if i%100 == 99 {
-					slog.Debug("sent another hundred files", "total", i+1)
+					slog.Info("sent another hundred files", "total", i+1)
 				}
 			}
 
-			err = commitTransaction(transactionID)
+			err = commitTransaction(train, transactionID)
 			if err != nil {
 				slog.Error("failed to commit transaction", "err", err.Error())
 				anyError = err
@@ -184,10 +197,10 @@ func initTestDir(numFiles, fileSize int) (string, error) {
 	return testId, nil
 }
 
-func publishingSimulation(testId string, subDirs, version, publishFiles, fileSize int) error {
+func publishingSimulation(train *url.URL, testId string, subDirs, version, publishFiles, fileSize int) error {
 	testDir := "/test/" + testId
 
-	transactionID, err := openTransaction()
+	transactionID, err := openTransaction(train)
 	if err != nil {
 		slog.Error("failed to open publishing transaction", "err", err.Error())
 		return err
@@ -209,7 +222,7 @@ func publishingSimulation(testId string, subDirs, version, publishFiles, fileSiz
 
 	slog.Debug("created publishing manifest", "mf", mf)
 
-	err = sendManifest(transactionID, &mf)
+	err = sendManifest(train, transactionID, &mf)
 	if err != nil {
 		slog.Error("failed to send manifest", "err", err.Error())
 		return err
@@ -227,18 +240,15 @@ func publishingSimulation(testId string, subDirs, version, publishFiles, fileSiz
 		slog.Debug("generated publishing test data", "subdir", subdir, "length", len(data))
 
 		uri := path.Join(testDir, subdir, "data.json")
-		err = sendFile(transactionID, uri, data)
+		err = sendFile(train, transactionID, uri, data)
 		if err != nil {
 			slog.Error("failed to publish file", "err", err.Error())
 			return err
 		}
 		slog.Debug("published test data", "subdir", subdir, "length", len(data))
-		if i%100 == 99 {
-			slog.Debug("published another hundred files", "total", i+1)
-		}
 	}
 
-	err = commitTransaction(transactionID)
+	err = commitTransaction(train, transactionID)
 	if err != nil {
 		slog.Error("failed to commit transaction", "err", err.Error())
 		return err
@@ -248,8 +258,8 @@ func publishingSimulation(testId string, subDirs, version, publishFiles, fileSiz
 	return nil
 }
 
-func cleanup(dirToClean string) error {
-	transactionID, err := openTransaction()
+func cleanup(train *url.URL, dirToClean string) error {
+	transactionID, err := openTransaction(train)
 	if err != nil {
 		slog.Error("failed to open cleanup transaction", "err", err.Error())
 		return err
@@ -262,13 +272,13 @@ func cleanup(dirToClean string) error {
 		UrisToDelete: []string{dirToClean},
 	}
 
-	err = sendManifest(transactionID, &mf)
+	err = sendManifest(train, transactionID, &mf)
 	if err != nil {
 		slog.Error("failed to send cleanup manifest", "err", err.Error())
 		return err
 	}
 
-	err = commitTransaction(transactionID)
+	err = commitTransaction(train, transactionID)
 	if err != nil {
 		slog.Error("failed to commit cleanup transaction", "err", err.Error())
 		return err
@@ -291,15 +301,12 @@ type openTransactionResponse struct {
 	} `json:"transaction"`
 }
 
-func openTransaction() (string, error) {
-	url, err := url.Parse(trainURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse train url: [%w]", err)
-	}
-	url.Path = path.Join(url.Path, "begin")
-	slog.Debug("opening transaction", "url", url.String())
+func openTransaction(train *url.URL) (string, error) {
+	newUrl := *train
+	newUrl.Path = path.Join(newUrl.Path, "begin")
+	slog.Debug("opening transaction", "url", newUrl.String())
 
-	r, err := http.Post(url.String(), "", http.NoBody)
+	r, err := http.Post(newUrl.String(), "", http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("failed to call train: [%w]", err)
 	}
@@ -329,19 +336,16 @@ type commitTransactionResponse struct {
 	} `json:"transaction"`
 }
 
-func commitTransaction(transactionID string) error {
-	url, err := url.Parse(trainURL)
-	if err != nil {
-		return fmt.Errorf("failed to parse train url: [%w]", err)
-	}
-	url.Path = path.Join(url.Path, "commit")
-	q := url.Query()
+func commitTransaction(train *url.URL, transactionID string) error {
+	newUrl := *train
+	newUrl.Path = path.Join(newUrl.Path, "commit")
+	q := newUrl.Query()
 	q.Set("transactionId", transactionID)
-	url.RawQuery = q.Encode()
+	newUrl.RawQuery = q.Encode()
 
-	slog.Debug("committing transaction", "url", url.String())
+	slog.Debug("committing transaction", "url", newUrl.String())
 
-	r, err := http.Post(url.String(), "", http.NoBody)
+	r, err := http.Post(newUrl.String(), "", http.NoBody)
 	if err != nil {
 		return fmt.Errorf("failed to call train: [%w]", err)
 	}
@@ -363,16 +367,13 @@ func commitTransaction(transactionID string) error {
 	return nil
 }
 
-func sendFile(transactionID, uri string, data []byte) error {
-	url, err := url.Parse(trainURL)
-	if err != nil {
-		return fmt.Errorf("failed to parse train url: [%w]", err)
-	}
-	url.Path = path.Join(url.Path, "publish")
-	q := url.Query()
+func sendFile(train *url.URL, transactionID, uri string, data []byte) error {
+	newUrl := *train
+	newUrl.Path = path.Join(newUrl.Path, "publish")
+	q := newUrl.Query()
 	q.Set("transactionId", transactionID)
 	q.Set("uri", uri)
-	url.RawQuery = q.Encode()
+	newUrl.RawQuery = q.Encode()
 
 	buf := new(bytes.Buffer)
 	mpw := multipart.NewWriter(buf)
@@ -390,9 +391,9 @@ func sendFile(transactionID, uri string, data []byte) error {
 		return fmt.Errorf("failed to close form file: [%w]", err)
 	}
 
-	slog.Debug("sending file", "url", url.String())
+	slog.Debug("sending file", "url", newUrl.String())
 
-	r, err := http.Post(url.String(), contentType, buf)
+	r, err := http.Post(newUrl.String(), contentType, buf)
 	if err != nil {
 		return fmt.Errorf("failed to call train: [%w]", err)
 	}
@@ -530,23 +531,20 @@ type sendManifestResponse struct {
 	} `json:"transaction"`
 }
 
-func sendManifest(transactionID string, mf *manifest) error {
-	url, err := url.Parse(trainURL)
-	if err != nil {
-		return fmt.Errorf("failed to parse train url: [%w]", err)
-	}
-	url.Path = path.Join(url.Path, "CommitManifest")
-	q := url.Query()
+func sendManifest(train *url.URL, transactionID string, mf *manifest) error {
+	newUrl := *train
+	newUrl.Path = path.Join(newUrl.Path, "CommitManifest")
+	q := newUrl.Query()
 	q.Set("transactionId", transactionID)
-	url.RawQuery = q.Encode()
+	newUrl.RawQuery = q.Encode()
 
 	payload, err := json.Marshal(mf)
 	if err != nil {
 		return fmt.Errorf("failed to marshal manifest: [%w]", err)
 	}
 
-	slog.Debug("sending manifest", "url", url.String())
-	r, err := http.Post(url.String(), "application/json", bytes.NewReader(payload))
+	slog.Debug("sending manifest", "url", newUrl.String())
+	r, err := http.Post(newUrl.String(), "application/json", bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("failed to call train: [%w]", err)
 	}
