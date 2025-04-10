@@ -36,33 +36,33 @@ func main() {
 
 	startTime := time.Now()
 
-	flagSo := flag.Bool("so", false, "only run setup stage")
-	flagId := flag.String("id", "", "use existing test directory id (skips setup)")
+	flagBatchSize := flag.Int("batch", defaultSetupBatchSize, "number of files in each batch on setup")
+	flagCleanOnly := flag.Bool("clean", false, "clean whole test directory and exit")
+	flagCopyFiles := flag.Int("cp", defaultNumFiles, "number of files to copy via manifest")
 	flagDebug := flag.Bool("debug", false, "debug mode")
 	flagFileSize := flag.Int("fsize", defaultFileSize, "file size in kb")
-	flagSetupFiles := flag.Int("sf", defaultNumFiles, "number of files to send on setup")
-	flagCopyFiles := flag.Int("cp", defaultNumFiles, "number of files to copy via manifest")
-	flagPublishFiles := flag.Int("pf", defaultNumFiles, "number of files to send during publish")
-	flagVersion := flag.Int("v", 1, "version to create on publish")
+	flagId := flag.String("id", "", "use existing test directory id (skips setup)")
 	flagNoCleanup := flag.Bool("noclean", false, "do not clean up test files")
-	flagCleanAll := flag.Bool("clean", false, "clean whole test directory and exit")
-	flagBatchSize := flag.Int("batch", defaultSetupBatchSize, "number of files in each batch on setup")
+	flagPublishFiles := flag.Int("pf", defaultNumFiles, "number of files to send during publish")
+	flagSetupFiles := flag.Int("sf", defaultNumFiles, "number of files to send on setup")
+	flagSo := flag.Bool("so", false, "only run setup stage")
 	flagTrainUrl := flag.String("url", DefaultTrainURL, "train url")
+	flagVersion := flag.Int("v", 1, "version to create on publish")
 
 	flag.Parse()
 
 	config := runConfig{
-		CleanOnly:    *flagCleanAll,
-		SetupOnly:    *flagSo,
-		ID:           *flagId,
-		FileSize:     *flagFileSize * 1024,
-		SetupFiles:   *flagSetupFiles,
-		CopyFiles:    *flagCopyFiles,
-		PublishFiles: *flagPublishFiles,
-		Version:      *flagVersion,
-		Cleanup:      !(*flagNoCleanup),
 		BatchSize:    *flagBatchSize,
+		CleanOnly:    *flagCleanOnly,
+		Cleanup:      !(*flagNoCleanup),
+		CopyFiles:    *flagCopyFiles,
+		FileSize:     *flagFileSize * 1024,
+		ID:           *flagId,
+		PublishFiles: *flagPublishFiles,
+		SetupFiles:   *flagSetupFiles,
+		SetupOnly:    *flagSo,
 		TrainURL:     *flagTrainUrl,
+		Version:      *flagVersion,
 	}
 
 	if *flagDebug {
@@ -84,17 +84,16 @@ func main() {
 }
 
 type runConfig struct {
-	CleanOnly    bool
-	SetupOnly    bool
-	ID           string
-	FileSize     int
-	NumFiles     int
-	SetupFiles   int
-	CopyFiles    int
-	PublishFiles int
-	Version      int
-	Cleanup      bool
 	BatchSize    int
+	CleanOnly    bool
+	Cleanup      bool
+	CopyFiles    int
+	FileSize     int
+	ID           string
+	PublishFiles int
+	SetupFiles   int
+	SetupOnly    bool
+	Version      int
 	TrainURL     string
 }
 

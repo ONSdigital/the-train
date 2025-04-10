@@ -1,6 +1,7 @@
 APP=train-stress-test
 
 ENV?=sandbox
+HOST?=1
 TRAIN_URL=http://localhost:8084/
 
 GOOS?=$(shell go env GOOS)
@@ -19,7 +20,7 @@ build-aws:
 
 .PHONY: deploy
 deploy: build-aws
-	dp scp $(ENV) web_mount 1  -- $(BUILD)/linux-amd64/$(APP) $(APP);
+	dp scp $(ENV) web_mount $(HOST)  -- $(BUILD)/linux-amd64/$(APP) $(APP);
 
 .PHONY: clean
 clean:
