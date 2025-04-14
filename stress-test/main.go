@@ -91,8 +91,8 @@ type runConfig struct {
 	FileSize     int
 	ID           string
 	PublishFiles int
-	SetupFiles   int
 	SetupOnly    bool
+	SetupFiles   int
 	Version      int
 	TrainURL     string
 }
@@ -229,22 +229,41 @@ func publishingSimulation(train *url.URL, testId string, subDirs, version, publi
 
 	// Publish some new files
 
+	fileNumberChannel := make(chan int, 10)
+	wg := sync.WaitGroup{}
+	var anyError error = nil
+
+	for sender := 0; sender < 10; sender++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range fileNumberChannel {
+				subdir := genSubDirName(i)
+
+				data, err := genFileContent(path.Join(testDir, subdir), subdir, fileSize)
+				if err != nil {
+					anyError = fmt.Errorf("failed to generate test data for file publish: %w", err)
+				}
+				slog.Debug("generated publishing test data", "subdir", subdir, "length", len(data))
+
+				uri := path.Join(testDir, subdir, "data.json")
+				err = sendFile(train, transactionID, uri, data)
+				if err != nil {
+					slog.Error("failed to publish file", "err", err.Error())
+					anyError = err
+				}
+				slog.Debug("published test data", "subdir", subdir, "length", len(data))
+			}
+		}()
+	}
+
 	for i := 0; i < publishFiles; i++ {
-		subdir := genSubDirName(i)
+		fileNumberChannel <- i
+	}
 
-		data, err := genFileContent(path.Join(testDir, subdir), subdir, fileSize)
-		if err != nil {
-			return fmt.Errorf("failed to generate test data for file publish: %w", err)
-		}
-		slog.Debug("generated publishing test data", "subdir", subdir, "length", len(data))
-
-		uri := path.Join(testDir, subdir, "data.json")
-		err = sendFile(train, transactionID, uri, data)
-		if err != nil {
-			slog.Error("failed to publish file", "err", err.Error())
-			return err
-		}
-		slog.Debug("published test data", "subdir", subdir, "length", len(data))
+	wg.Wait()
+	if anyError != nil {
+		return anyError
 	}
 
 	err = commitTransaction(train, transactionID)
@@ -455,6 +474,9 @@ func genFileContent(uri, name string, size int) ([]byte, error) {
 }
 
 func genContentPadding(size int) string {
+	if size < 1 {
+		return ""
+	}
 	padding := make([]byte, size)
 	next := "C"
 	sentsLeft, wordsLeft, chsLeft := 0, 0, 0
