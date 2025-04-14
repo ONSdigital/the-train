@@ -23,6 +23,7 @@ const (
 	defaultNumFiles       = 500
 	defaultFileSize       = 5
 	defaultSetupBatchSize = 100
+	zebedeeThreadPool     = 10 // number of concurrent threads in zebedee sending files to the train
 )
 
 var (
@@ -229,11 +230,11 @@ func publishingSimulation(train *url.URL, testId string, subDirs, version, publi
 
 	// Publish some new files
 
-	fileNumberChannel := make(chan int, 10)
+	fileNumberChannel := make(chan int, zebedeeThreadPool)
 	wg := sync.WaitGroup{}
 	var anyError error = nil
 
-	for sender := 0; sender < 10; sender++ {
+	for sender := 0; sender < zebedeeThreadPool; sender++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -260,6 +261,7 @@ func publishingSimulation(train *url.URL, testId string, subDirs, version, publi
 	for i := 0; i < publishFiles; i++ {
 		fileNumberChannel <- i
 	}
+	close(fileNumberChannel)
 
 	wg.Wait()
 	if anyError != nil {
@@ -385,6 +387,13 @@ func commitTransaction(train *url.URL, transactionID string) error {
 	return nil
 }
 
+type sendFileResponse struct {
+	Message     string `json:"message"`
+	Transaction struct {
+		ID string `json:"id"`
+	} `json:"transaction"`
+}
+
 func sendFile(train *url.URL, transactionID, uri string, data []byte) error {
 	newUrl := *train
 	newUrl.Path = path.Join(newUrl.Path, "publish")
@@ -422,13 +431,13 @@ func sendFile(train *url.URL, transactionID, uri string, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to read train response: [%w]", err)
 	}
-	tr := commitTransactionResponse{}
+	tr := sendFileResponse{}
 	err = json.Unmarshal(body, &tr)
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal train response: [%w]", err)
 	}
 
-	slog.Debug("committed transaction", "id", transactionID)
+	slog.Debug("sent file", "id", transactionID, "uri", uri)
 
 	return nil
 }
