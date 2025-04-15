@@ -33,7 +33,6 @@ var (
 func main() {
 	lh := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 	slog.SetDefault(slog.New(lh))
-	slog.Info("starting")
 
 	startTime := time.Now()
 
@@ -72,8 +71,6 @@ func main() {
 		slog.Debug("debug mode")
 	}
 
-	slog.Debug("parsed flags", "flags ", flag.Args(), "config", config)
-
 	err := run(config)
 	if err != nil {
 		slog.Error("fatal error", "err", err.Error())
@@ -99,12 +96,12 @@ type runConfig struct {
 }
 
 func run(config runConfig) error {
+	slog.Debug("running command", "config", config)
 	train, err := url.Parse(config.TrainURL)
 	if err != nil {
 		return fmt.Errorf("failed to parse train url: [%w]", err)
 	}
 	if config.CleanOnly {
-		slog.Info("cleaning entire test directory")
 		return cleanup(train, "/test")
 	}
 
@@ -115,7 +112,6 @@ func run(config runConfig) error {
 			return err
 		}
 		testId = newTestId
-		slog.Info("initialised test directory", "testId", testId)
 	}
 	if config.SetupOnly {
 		return nil
@@ -178,7 +174,7 @@ func initTestDir(train *url.URL, numFiles, fileSize, batchSize int) (string, err
 				}
 				slog.Debug("sent test data", "subdir", subdir, "length", len(data))
 				if i%100 == 99 {
-					slog.Info("sent another hundred files", "total", i+1)
+					slog.Debug("sent another hundred files", "total", i+1)
 				}
 			}
 
@@ -194,12 +190,16 @@ func initTestDir(train *url.URL, numFiles, fileSize, batchSize int) (string, err
 	if anyError != nil {
 		return "", anyError
 	}
+	slog.Info("initialised test directory", testId, testId)
 	return testId, nil
 }
 
-func publishingSimulation(train *url.URL, testId string, subDirs, version, publishFiles, fileSize int) error {
+func publishingSimulation(train *url.URL, testId string, filesToCopy, version, filesToPublish, fileSize int) error {
 	testDir := "/test/" + testId
 
+	slog.Info("starting publishing simulation", "filesToCopy", filesToCopy, "filesToPublish", filesToPublish, "fileSize", fileSize, "version", version, "testId", testId)
+
+	startPrePublish := time.Now()
 	transactionID, err := openTransaction(train)
 	if err != nil {
 		slog.Error("failed to open publishing transaction", "err", err.Error())
@@ -212,7 +212,7 @@ func publishingSimulation(train *url.URL, testId string, subDirs, version, publi
 		FilesToCopy:  make([]fileToCopy, 0),
 		UrisToDelete: make([]string, 0),
 	}
-	for i := 0; i < subDirs; i++ {
+	for i := 0; i < filesToCopy; i++ {
 		subdir := genSubDirName(i)
 		mf.FilesToCopy = append(mf.FilesToCopy, fileToCopy{
 			Source: path.Join(testDir, subdir, "data.json"),
@@ -220,16 +220,21 @@ func publishingSimulation(train *url.URL, testId string, subDirs, version, publi
 		})
 	}
 
-	slog.Debug("created publishing manifest", "mf", mf)
+	slog.Debug("created pre-publishing manifest", "mf", mf)
 
 	err = sendManifest(train, transactionID, &mf)
 	if err != nil {
 		slog.Error("failed to send manifest", "err", err.Error())
 		return err
 	}
+	endPrePublish := time.Now()
+	slog.Info("published pre-publishing manifest")
+
+	slog.Info("pre-publish stage complete", "runTime", endPrePublish.Sub(startPrePublish).Round(time.Millisecond).Milliseconds())
 
 	// Publish some new files
 
+	startPublish := time.Now()
 	fileNumberChannel := make(chan int, zebedeeThreadPool)
 	wg := sync.WaitGroup{}
 	var anyError error = nil
@@ -258,7 +263,7 @@ func publishingSimulation(train *url.URL, testId string, subDirs, version, publi
 		}()
 	}
 
-	for i := 0; i < publishFiles; i++ {
+	for i := 0; i < filesToPublish; i++ {
 		fileNumberChannel <- i
 	}
 	close(fileNumberChannel)
@@ -268,6 +273,8 @@ func publishingSimulation(train *url.URL, testId string, subDirs, version, publi
 		return anyError
 	}
 
+	slog.Info("published test files", "numFiles", filesToPublish)
+
 	err = commitTransaction(train, transactionID)
 	if err != nil {
 		slog.Error("failed to commit transaction", "err", err.Error())
@@ -275,35 +282,43 @@ func publishingSimulation(train *url.URL, testId string, subDirs, version, publi
 	}
 	slog.Info("publishing transaction committed", "id", transactionID)
 
+	endPublish := time.Now()
+	slog.Info("publish stage complete", "runTime", endPublish.Sub(startPublish).Round(time.Millisecond).Milliseconds())
+
+	slog.Info("publishing simulation complete")
+
 	return nil
 }
 
 func cleanup(train *url.URL, dirToClean string) error {
+	slog.Info("cleanup of test directory", "dir", dirToClean)
 	transactionID, err := openTransaction(train)
 	if err != nil {
 		slog.Error("failed to open cleanup transaction", "err", err.Error())
 		return err
 	}
-	slog.Info("cleanup transaction created", "id", transactionID)
+	slog.Debug("cleanup transaction created", "id", transactionID)
 
 	// Send a cleanup manifest of uri to be deleted
 	mf := manifest{
 		FilesToCopy:  make([]fileToCopy, 0),
 		UrisToDelete: []string{dirToClean},
 	}
-
 	err = sendManifest(train, transactionID, &mf)
 	if err != nil {
 		slog.Error("failed to send cleanup manifest", "err", err.Error())
 		return err
 	}
+	slog.Debug("sent cleanup manifest", "mf", mf)
 
 	err = commitTransaction(train, transactionID)
 	if err != nil {
 		slog.Error("failed to commit cleanup transaction", "err", err.Error())
 		return err
 	}
-	slog.Info("cleanup completed", "id", transactionID)
+	slog.Debug("cleanup transaction committed", "id", transactionID)
+
+	slog.Info("cleanup completed", "dir", dirToClean)
 	return nil
 }
 
