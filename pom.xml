@@ -12,7 +12,7 @@
     <properties>
         <java.version>1.8</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <dp-logging.version>v2.0.0-beta.14</dp-logging.version>
+        <dp-logging.version>v2.0.0-beta.16</dp-logging.version>
         <jetty.version>9.4.57.v20241219</jetty.version>
     </properties>
 
@@ -226,18 +226,6 @@
                     <!-- if CVSS >= 7.0 (critical) then ERROR else WARN -->
                     <fail>true</fail>
                     <cvssScoreThreshold>7.0</cvssScoreThreshold>
-                    <excludeCoordinates>
-                        <!--
-                            As part of ticket: DIS-4047
-                            This is to exclude vulnerability CVE-2025-11226
-                        -->
-                        <exclude>
-                            <groupId>ch.qos.logback</groupId>
-                            <artifactId>logback-core</artifactId>
-                            <version>1.3.14</version>
-                        </exclude>
-                        <!-- End exclusion for DIS-4047 -->
-                    </excludeCoordinates>
                 </configuration>
                 <executions>
                     <execution>
