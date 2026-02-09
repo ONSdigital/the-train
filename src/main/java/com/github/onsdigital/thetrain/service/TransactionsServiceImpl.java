@@ -5,7 +5,7 @@ import com.github.onsdigital.thetrain.exception.PublishException;
 import com.github.onsdigital.thetrain.json.Transaction;
 import com.github.onsdigital.thetrain.storage.Transactions;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.http.HttpStatus;
+import org.apache.hc.core5.http.HttpStatus;
 import spark.Request;
 
 import java.nio.file.Path;

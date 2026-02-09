@@ -2,7 +2,7 @@ package com.github.onsdigital.thetrain.routes;
 
 import com.github.onsdigital.thetrain.exception.PublishException;
 import com.github.onsdigital.thetrain.json.Result;
-import org.apache.http.HttpStatus;
+import org.apache.hc.core5.http.HttpStatus;
 import org.junit.Test;
 import spark.Route;
 

@@ -8,7 +8,7 @@ import com.github.onsdigital.thetrain.service.PublisherService;
 import com.github.onsdigital.thetrain.service.TransactionsService;
 import com.github.onsdigital.thetrain.storage.Transactions;
 import com.google.gson.Gson;
-import org.apache.http.HttpStatus;
+import org.apache.hc.core5.http.HttpStatus;
 import spark.Request;
 import spark.Response;
 

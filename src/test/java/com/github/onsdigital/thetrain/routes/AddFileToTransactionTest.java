@@ -6,7 +6,7 @@ import com.github.onsdigital.thetrain.helpers.uploads.CloseablePart;
 import com.github.onsdigital.thetrain.json.Result;
 import com.github.onsdigital.thetrain.storage.TransactionUpdate;
 import org.apache.commons.codec.digest.DigestUtils;
-import org.apache.http.HttpStatus;
+import org.apache.hc.core5.http.HttpStatus;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;

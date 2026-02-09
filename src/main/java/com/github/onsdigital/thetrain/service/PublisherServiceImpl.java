@@ -5,7 +5,7 @@ import com.github.onsdigital.thetrain.json.Transaction;
 import com.github.onsdigital.thetrain.json.request.Manifest;
 import com.github.onsdigital.thetrain.storage.Publisher;
 import com.github.onsdigital.thetrain.storage.TransactionUpdate;
-import org.apache.http.HttpStatus;
+import org.apache.hc.core5.http.HttpStatus;
 
 import java.io.InputStream;
 import java.nio.file.Path;

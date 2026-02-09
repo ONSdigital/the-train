@@ -1,7 +1,7 @@
 package com.github.onsdigital.thetrain.exception;
 
 import com.github.onsdigital.thetrain.json.Transaction;
-import org.apache.http.HttpStatus;
+import org.apache.hc.core5.http.HttpStatus;
 
 public class PublishException extends Exception {
 
