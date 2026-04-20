@@ -13,7 +13,7 @@
         <java.version>1.8</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <dp-logging.version>v2.0.0-beta.16</dp-logging.version>
-        <jetty.version>9.4.57.v20241219</jetty.version>
+        <jetty.version>9.4.58.v20250814</jetty.version>
     </properties>
 
     <repositories>
@@ -226,6 +226,14 @@
                     <!-- if CVSS >= 7.0 (critical) then ERROR else WARN -->
                     <fail>true</fail>
                     <cvssScoreThreshold>7.0</cvssScoreThreshold>
+                    <excludeVulnerabilityIds>
+                        <!-- Note - OSS Index suppressions are global, not per dependency -->
+                        <!--
+                            Jira epic to remove the following exclusion: DIS-4777
+                         -->
+                        <exclude>CVE-2026-2332</exclude>
+                        <!-- End DIS-4777 -->
+                    </excludeVulnerabilityIds>
                 </configuration>
                 <executions>
                     <execution>
