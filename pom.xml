@@ -98,7 +98,7 @@
         <dependency>
             <groupId>com.github.onsdigital</groupId>
             <artifactId>dp-cryptolite-java</artifactId>
-            <version>1.5.1</version>
+            <version>1.9.0</version>
             <exclusions>
                 <exclusion>
                     <groupId>org.bouncycastle</groupId>
